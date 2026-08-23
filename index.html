@@ -331,14 +331,14 @@ const ROAD_WIDTH = {
    ========================================================================= */
 const Z = { ground:0, water:0.05, road:0.18 }; // дороги/вода приподняты над землёй в метрах, чтобы не мерцали (z-fighting)
 
-function collectPolygons(osm, wantedIds, isBuildingLike){
+function collectPolygons(osm, tagFilter){
   const { nodes, ways, relations } = osm;
   const results = []; // {outerRingsWithHoles:[{outer:[{x,y}],holes:[[{x,y}],...]}], tags}
   const consumedWayIds = new Set();
 
   // относения-мультиполигоны
   for(const rel of relations){
-    if(!wantedIds(rel.tags)) continue;
+    if(!tagFilter(rel.tags)) continue;
     const outerWayIds = rel.members.filter(m=>m.type==='way' && m.role==='outer').map(m=>m.ref);
     const innerWayIds = rel.members.filter(m=>m.type==='way' && m.role==='inner').map(m=>m.ref);
     outerWayIds.forEach(id=>consumedWayIds.add(id));
@@ -356,7 +356,7 @@ function collectPolygons(osm, wantedIds, isBuildingLike){
   // обычные way (не входящие ни в одно relation выше)
   for(const [id, way] of ways){
     if(consumedWayIds.has(id)) continue;
-    if(!wantedIds(way.tags)) continue;
+    if(!tagFilter(way.tags)) continue;
     if(way.nodes.length < 3) continue;
     const ring = way.nodes.map(nid=>nodes.get(nid)).filter(Boolean);
     if(ring.length < 3) continue;
@@ -624,7 +624,7 @@ function buildScene(){
   modelGroup.add(groundMesh);
 
   // --- здания (с корректной сборкой мультиполигонов) ---
-  const buildingPolys = collectPolygons(osm, null, tags => !!tags.building && tags.building!=='no');
+  const buildingPolys = collectPolygons(osm, tags => !!tags.building && tags.building!=='no');
   const projectedBuildings = projectPolygonSet(buildingPolys, project);
   for(const b of projectedBuildings){
     const cat = classify(b.tags);
@@ -642,7 +642,7 @@ function buildScene(){
 
   // --- водоёмы (тоже через мультиполигон-сборку) ---
   if(st.waterOn){
-    const waterPolys = collectPolygons(osm, null, tags => tags.natural==='water' || tags.waterway==='riverbank');
+    const waterPolys = collectPolygons(osm, tags => tags.natural==='water' || tags.waterway==='riverbank');
     const projectedWater = projectPolygonSet(waterPolys, project);
     for(const wpoly of projectedWater){
       for(const sh of wpoly.shapes){
