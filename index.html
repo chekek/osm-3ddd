@@ -326,6 +326,15 @@ const ROAD_WIDTH = {
   cycleway:1.8, pedestrian:4, track:2.5
 };
 
+function shiftBrightness(hex, deltaPct){
+  const c = new THREE.Color(hex);
+  const hsl = {h:0,s:0,l:0};
+  c.getHSL(hsl);
+  hsl.l = Math.min(1, Math.max(0, hsl.l + deltaPct/100));
+  c.setHSL(hsl.h, hsl.s, hsl.l);
+  return '#' + c.getHexString();
+}
+
 /* =========================================================================
    6. ПОСТРОЕНИЕ ГЕОМЕТРИИ ИЗ OSM-ДАННЫХ
    ========================================================================= */
@@ -621,6 +630,7 @@ function buildScene(){
   groundGeo.rotateX(-Math.PI/2);
   const groundMesh = new THREE.Mesh(groundGeo, new THREE.MeshLambertMaterial({ color: st.groundColor }));
   groundMesh.position.set(cx, Z.ground, -cy);
+  groundMesh.userData.layer = 'ground';
   modelGroup.add(groundMesh);
 
   // --- здания (с корректной сборкой мультиполигонов) ---
@@ -634,8 +644,14 @@ function buildScene(){
     for(const sh of b.shapes){
       if(sh.outer.length < 3) continue;
       const geo = shapeToGeometry(sh.outer, sh.holes, height);
-      const mat = new THREE.MeshLambertMaterial({ color: catSet.color });
-      const mesh = new THREE.Mesh(geo, mat);
+      // ExtrudeGeometry сама делит грани на 2 группы: materialIndex 0 = боковые стены,
+      // materialIndex 1 = крышка (верх+низ). Даём им чуть разную яркость от базового
+      // цвета категории — плюс дополнительная разница между стенами появится
+      // естественным образом от направленного света (Lambert).
+      const wallMat = new THREE.MeshLambertMaterial({ color: shiftBrightness(catSet.color, -12) });
+      const roofMat = new THREE.MeshLambertMaterial({ color: shiftBrightness(catSet.color, +14) });
+      const mesh = new THREE.Mesh(geo, [wallMat, roofMat]);
+      mesh.userData.layer = cat;
       modelGroup.add(mesh);
     }
   }
@@ -650,7 +666,9 @@ function buildScene(){
         const geo = shapeToGeometry(sh.outer, sh.holes, 0.08);
         geo.translate(0, Z.water, 0);
         const mat = new THREE.MeshLambertMaterial({ color: st.waterColor });
-        modelGroup.add(new THREE.Mesh(geo, mat));
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.userData.layer = 'water';
+        modelGroup.add(mesh);
       }
     }
   }
@@ -677,7 +695,9 @@ function buildScene(){
         const geo = new THREE.ExtrudeGeometry(shape, { depth:0.08, bevelEnabled:false, curveSegments:1 });
         geo.rotateX(-Math.PI/2);
         geo.translate(0, Z.road, 0);
-        modelGroup.add(new THREE.Mesh(geo, roadMat));
+        const mesh = new THREE.Mesh(geo, roadMat);
+        mesh.userData.layer = 'roads';
+        modelGroup.add(mesh);
       }
     }
   }
@@ -693,10 +713,15 @@ document.getElementById('btnApplyColors').addEventListener('click', ()=>{
 /* =========================================================================
    9. ЭКСПОРТ В SVG (с фиксами под Illustrator)
    ========================================================================= */
-document.getElementById('btnExportSVG').addEventListener('click', ()=>{
-  if(!modelGroup.children.length){ alert('Сначала сгенерируй 3D-модель'); return; }
+const LAYER_ORDER  = ['ground','water','roads','residential','commercial','education','industrial','religious','other'];
+const LAYER_LABELS = { ground:'Земля', water:'Водоёмы', roads:'Дороги', residential:'Жилые',
+  commercial:'Коммерция / офисы', education:'Образование', industrial:'Промышленность',
+  religious:'Религиозные', other:'Прочие здания' };
 
-  const w = container.clientWidth, h = container.clientHeight;
+/* Рендерит ОДИН слой (набор мешей одной категории) отдельным проходом SVGRenderer
+   и оборачивает результат в <g id="layer-..."> — так Illustrator при импорте
+   распознаёт каждую категорию как отдельный слой. */
+function renderLayerToGroup(layerKey, meshes, w, h, camera){
   const svgRenderer = new SVGRenderer();
   svgRenderer.setSize(w,h);
   svgRenderer.setQuality('high');
@@ -704,42 +729,84 @@ document.getElementById('btnExportSVG').addEventListener('click', ()=>{
   // некорректно рисует как рваные/задвоенные углы на стыках граней.
   svgRenderer.overdraw = 0;
 
-  // временная сцена с "сваренными" вершинами (mergeVertices), чтобы убрать
-  // микрощели между соседними гранями (ещё одна причина рваных углов в AI)
-  const exportGroup = modelGroup.clone(true);
-  exportGroup.traverse(obj=>{
-    if(obj.isMesh){
-      let geo = obj.geometry.toNonIndexed();
-      geo = BufferGeometryUtils.mergeVertices(geo, 1e-4);
-      geo.computeVertexNormals();
-      obj.geometry = geo;
-      // обводка = заливке скрывает оставшиеся волосяные щели на стыках граней
-      const srcColor = obj.material.color ? obj.material.color.getHex() : 0xcccccc;
-      obj.material = new THREE.MeshBasicMaterial({ color: srcColor });
-    }
-  });
-  const exportScene = new THREE.Scene();
-  exportScene.add(exportGroup);
+  const scene = new THREE.Scene();
+  scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+  const sunClone = new THREE.DirectionalLight(0xffffff, 0.8);
+  sunClone.position.copy(sun.position);
+  scene.add(sunClone);
 
-  svgRenderer.render(exportScene, activeCam);
+  const grp = new THREE.Group();
+  for(const m of meshes){
+    const clone = m.clone();
+    // сварка вершин (mergeVertices) убирает микрощели между соседними гранями,
+    // НЕ трогая нормали разных граней (у них разные normal -> не сольются),
+    // поэтому крыша/стены по-прежнему освещаются по-разному (Lambert)
+    let geo = clone.geometry.toNonIndexed();
+    geo = BufferGeometryUtils.mergeVertices(geo, 1e-4);
+    geo.computeVertexNormals();
+    clone.geometry = geo;
+    clone.material = Array.isArray(m.material)
+      ? m.material.map(mm => new THREE.MeshLambertMaterial({ color: mm.color.getHex() }))
+      : new THREE.MeshLambertMaterial({ color: m.material.color.getHex() });
+    grp.add(clone);
+  }
+  scene.add(grp);
+  svgRenderer.render(scene, camera);
   const svgEl = svgRenderer.domElement;
 
-  // проставляем stroke=fill каждому path, чтобы Illustrator не оставлял
-  // сабпиксельные разрывы на границах треугольников
+  // обводка = заливке — скрывает оставшиеся волосяные щели на стыках треугольников
   svgEl.querySelectorAll('path').forEach(p=>{
     const fill = p.getAttribute('fill');
     if(fill && fill !== 'none'){
       p.setAttribute('stroke', fill);
       p.setAttribute('stroke-width', '0.6');
-      p.setAttribute('stroke-linejoin','round');
+      p.setAttribute('stroke-linejoin', 'round');
     }
   });
 
-  const serializer = new XMLSerializer();
-  let source = serializer.serializeToString(svgEl);
-  if(!source.match(/^<svg[^>]+xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)){
-    source = source.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const g = document.createElementNS(svgNS, 'g');
+  g.setAttribute('id', 'layer-' + layerKey);
+  const title = document.createElementNS(svgNS, 'title');
+  title.textContent = LAYER_LABELS[layerKey] || layerKey;
+  g.appendChild(title);
+  Array.from(svgEl.childNodes).forEach(node => { if(node.nodeType === 1) g.appendChild(node); });
+
+  return { g, width: svgEl.getAttribute('width'), height: svgEl.getAttribute('height'), viewBox: svgEl.getAttribute('viewBox') };
+}
+
+document.getElementById('btnExportSVG').addEventListener('click', ()=>{
+  if(!modelGroup.children.length){ alert('Сначала сгенерируй 3D-модель'); return; }
+
+  const w = container.clientWidth, h = container.clientHeight;
+
+  const byLayer = {};
+  modelGroup.children.forEach(m=>{
+    const key = m.userData.layer || 'other';
+    (byLayer[key] = byLayer[key] || []).push(m);
+  });
+
+  let rootAttrs = null;
+  const groups = [];
+  for(const key of LAYER_ORDER){
+    const meshes = byLayer[key];
+    if(!meshes || !meshes.length) continue;
+    const result = renderLayerToGroup(key, meshes, w, h, activeCam);
+    groups.push(result.g);
+    if(!rootAttrs) rootAttrs = result;
   }
+  if(!groups.length){ alert('Нет объектов для экспорта — включи хотя бы один слой в разделе "Что рисовать"'); return; }
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.createElementNS(svgNS, 'svg');
+  root.setAttribute('xmlns', svgNS);
+  root.setAttribute('width', rootAttrs.width || w);
+  root.setAttribute('height', rootAttrs.height || h);
+  if(rootAttrs.viewBox) root.setAttribute('viewBox', rootAttrs.viewBox);
+  groups.forEach(g => root.appendChild(g));
+
+  const serializer = new XMLSerializer();
+  let source = serializer.serializeToString(root);
   const blob = new Blob([source], {type:'image/svg+xml;charset=utf-8'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
