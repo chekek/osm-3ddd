@@ -57,6 +57,11 @@
   }
   .badge{display:inline-block;padding:1px 6px;border-radius:4px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:10px;}
   a.link{color:var(--accent);}
+  #buildingEditor{
+    position:absolute;bottom:10px;left:10px;background:rgba(17,19,25,.92);border:1px solid var(--line);
+    border-radius:8px;padding:10px;min-width:180px;backdrop-filter:blur(4px);z-index:11;
+  }
+  #buildingEditor .row label{color:var(--muted);font-size:12px;}
 </style>
 </head>
 <body>
@@ -71,6 +76,7 @@
       <input id="overpassUrl" type="text" value="https://overpass-api.de/api/interpreter">
       <small class="hint">Нарисуй прямоугольник на карте выше (кнопка ▭ в левом верхнем углу карты), затем жми «Сгенерировать 3D». Для РФ-подключения можно подставить зеркало, напр. <span class="badge">overpass.kumi.systems/api/interpreter</span></small>
       <button class="primary" id="btnGenerate" style="width:100%;margin-top:4px;">⚙ Сгенерировать 3D</button>
+      <button id="btnGenerateTerrain" style="width:100%;margin-top:4px;">⛰ Сгенерировать 3D с рельефом</button>
       <div id="status">Ожидание выбора участка…</div>
 
       <h3>2. Что рисовать</h3>
@@ -82,6 +88,7 @@
       <div class="row"><input type="checkbox" id="catOther" checked><label for="catOther">Прочие здания</label><input type="color" id="colOther" value="#bcbcbc"></div>
       <div class="row"><input type="checkbox" id="catRoads" checked><label for="catRoads">Дороги</label><input type="color" id="colRoads" value="#3a3a3a"></div>
       <div class="row"><input type="checkbox" id="catWater" checked><label for="catWater">Водоёмы</label><input type="color" id="colWater" value="#5f9ea8"></div>
+      <div class="row"><input type="checkbox" id="catParks" checked><label for="catParks">Парки / леса (полупрозр.)</label><input type="color" id="colParks" value="#4caf6a"></div>
       <div class="row"><label>Земля (поверхность)</label><input type="color" id="colGround" value="#e9e5da"></div>
       <button id="btnApplyColors" style="width:100%;">Применить цвета / фильтр</button>
 
@@ -129,6 +136,16 @@
       <div>target: <span id="hudTarget">—</span></div>
     </div>
     <div id="loading">Загрузка данных OSM…</div>
+
+    <div id="buildingEditor" style="display:none;">
+      <div style="font-weight:600;margin-bottom:6px;color:var(--accent2);">Здание</div>
+      <div class="row"><label>Высота, м</label><input type="number" id="editHeight" min="1" step="0.5" style="width:80px;"></div>
+      <div class="row"><label>Цвет</label><input type="color" id="editColor"></div>
+      <div class="grid2" style="margin-top:6px;">
+        <button class="primary" id="editApply">Применить</button>
+        <button id="editClose">Закрыть</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -197,6 +214,12 @@ async function fetchOsmData(bbox){
       relation["natural"="water"](${bboxStr});
       way["waterway"="riverbank"](${bboxStr});
       relation["type"="multipolygon"]["natural"="water"](${bboxStr});
+      way["leisure"="park"](${bboxStr});
+      relation["leisure"="park"](${bboxStr});
+      way["landuse"="forest"](${bboxStr});
+      relation["landuse"="forest"](${bboxStr});
+      way["natural"="wood"](${bboxStr});
+      relation["natural"="wood"](${bboxStr});
     );
     out body;
     >;
@@ -291,6 +314,70 @@ function makeProjector(origin){
     x: (lon - origin.lon) * Math.PI/180 * R * cosLat,
     y: (lat - origin.lat) * Math.PI/180 * R
   });
+}
+
+/* =========================================================================
+   4б. РЕЛЬЕФ: сетка высот с open-elevation.com (+ кэш в localStorage)
+   ========================================================================= */
+async function fetchElevationGrid(bbox, gridSize=10){
+  const cacheKey = 'elev_' + bbox.south.toFixed(5)+'_'+bbox.west.toFixed(5)+'_'+bbox.north.toFixed(5)+'_'+bbox.east.toFixed(5)+'_'+gridSize;
+  const cached = localStorage.getItem(cacheKey);
+  if(cached) return JSON.parse(cached);
+
+  const locations = [];
+  for(let i=0;i<gridSize;i++){
+    const lat = bbox.south + (bbox.north-bbox.south)*i/(gridSize-1);
+    for(let j=0;j<gridSize;j++){
+      const lon = bbox.west + (bbox.east-bbox.west)*j/(gridSize-1);
+      locations.push({ latitude:lat, longitude:lon });
+    }
+  }
+  const res = await fetch('https://api.open-elevation.com/api/v1/lookup', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ locations })
+  });
+  if(!res.ok) throw new Error('open-elevation ответил ' + res.status);
+  const data = await res.json();
+  const elevations = data.results.map(r => r.elevation);
+  const result = { gridSize, elevations };
+  try{ localStorage.setItem(cacheKey, JSON.stringify(result)); }catch(e){/* переполнен localStorage - не критично */}
+  return result;
+}
+
+/* Строит функцию sample(xMeters,yMeters) -> относительная высота над минимумом участка.
+   Сетка равномерна в lat/lon, поэтому для небольшого bbox её узлы проецируем
+   в метры один раз и далее интерполируем билинейно прямо в метровых координатах. */
+function buildElevationSampler(elevResult, bbox, project){
+  const n = elevResult.gridSize;
+  const elevations = elevResult.elevations;
+  const gridPts = [];
+  for(let i=0;i<n;i++){
+    const lat = bbox.south + (bbox.north-bbox.south)*i/(n-1);
+    const row = [];
+    for(let j=0;j<n;j++){
+      const lon = bbox.west + (bbox.east-bbox.west)*j/(n-1);
+      row.push(project(lat,lon));
+    }
+    gridPts.push(row);
+  }
+  const minX = gridPts[0][0].x, maxX = gridPts[0][n-1].x;
+  const minY = gridPts[0][0].y, maxY = gridPts[n-1][0].y;
+  const minElev = Math.min(...elevations);
+
+  return function sample(x, y){
+    let jf = (x-minX)/(maxX-minX)*(n-1);
+    let iff = (y-minY)/(maxY-minY)*(n-1);
+    jf = Math.min(Math.max(jf,0), n-1-1e-6);
+    iff = Math.min(Math.max(iff,0), n-1-1e-6);
+    const i0=Math.floor(iff), j0=Math.floor(jf);
+    const i1=Math.min(i0+1,n-1), j1=Math.min(j0+1,n-1);
+    const fi=iff-i0, fj=jf-j0;
+    const e00=elevations[i0*n+j0], e01=elevations[i0*n+j1];
+    const e10=elevations[i1*n+j0], e11=elevations[i1*n+j1];
+    const e0 = e00*(1-fj)+e01*fj;
+    const e1 = e10*(1-fj)+e11*fj;
+    return (e0*(1-fi)+e1*fi) - minElev;
+  };
 }
 
 /* =========================================================================
@@ -399,6 +486,30 @@ function shapeToGeometry(outerPts, holePtsArr, depth){
   const geo = new THREE.ExtrudeGeometry(shape, { depth: Math.max(depth,0.05), bevelEnabled:false, curveSegments:1 });
   geo.rotateX(-Math.PI/2); // переводим extrude-по-Z в Y-up (высота вверх)
   return geo;
+}
+
+function polygonCentroid(pts){
+  let x=0,y=0;
+  for(const p of pts){ x+=p.x; y+=p.y; }
+  return { x:x/pts.length, y:y/pts.length };
+}
+
+/* Земля с учётом рельефа: сетка вершин, каждая приподнята по сэмплеру высот. */
+function buildTerrainGround(w,h,cx,cy,segs,sampler,color){
+  const geo = new THREE.PlaneGeometry(w,h,segs,segs);
+  geo.rotateX(-Math.PI/2);
+  const pos = geo.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const mX = pos.getX(i)+cx;
+    const mY = cy - pos.getZ(i);
+    pos.setY(i, sampler(mX,mY));
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide }));
+  mesh.position.set(cx, Z.ground, -cy);
+  mesh.userData.layer = 'ground';
+  return mesh;
 }
 
 /* =========================================================================
@@ -570,7 +681,11 @@ animate();
    ========================================================================= */
 let lastOsmData = null; // сохраняем распарсенные данные, чтобы перекрашивать без повторной загрузки
 
-document.getElementById('btnGenerate').addEventListener('click', async ()=>{
+let lastOsmData = null; // сохраняем распарсенные данные, чтобы перекрашивать без повторной загрузки
+let lastUseTerrain = false;
+let buildingEditableEnabled = false;
+
+async function loadAndBuild(useTerrain){
   if(!currentBBox){ alert('Сначала нарисуй прямоугольник на карте (кнопка ▭)'); return; }
   const loading = document.getElementById('loading');
   loading.style.display = 'flex';
@@ -581,8 +696,17 @@ document.getElementById('btnGenerate').addEventListener('click', async ()=>{
     const osm = parseOsm(json);
     const origin = { lat:(currentBBox.south+currentBBox.north)/2, lon:(currentBBox.west+currentBBox.east)/2 };
     const project = makeProjector(origin);
-    lastOsmData = { osm, project, origin };
-    buildScene();
+    lastOsmData = { osm, project, origin, elevSampler: null };
+
+    if(useTerrain){
+      log('Загрузка сетки высот (open-elevation.com)…');
+      const elevGrid = await fetchElevationGrid(currentBBox, 10);
+      lastOsmData.elevSampler = buildElevationSampler(elevGrid, currentBBox, project);
+      log('Рельеф получен.');
+    }
+
+    buildScene(useTerrain);
+    lastUseTerrain = useTerrain;
     log('Готово. Модель построена.');
   }catch(err){
     console.error(err);
@@ -591,7 +715,9 @@ document.getElementById('btnGenerate').addEventListener('click', async ()=>{
   }finally{
     loading.style.display = 'none';
   }
-});
+}
+document.getElementById('btnGenerate').addEventListener('click', ()=>loadAndBuild(false));
+document.getElementById('btnGenerateTerrain').addEventListener('click', ()=>loadAndBuild(true));
 
 function currentSettings(){
   return {
@@ -607,14 +733,19 @@ function currentSettings(){
     roadColor: document.getElementById('colRoads').value,
     waterOn: document.getElementById('catWater').checked,
     waterColor: document.getElementById('colWater').value,
+    parksOn: document.getElementById('catParks').checked,
+    parksColor: document.getElementById('colParks').value,
     groundColor: document.getElementById('colGround').value,
   };
 }
 
-function buildScene(){
+const BUILDING_MAX_EDIT = 25;
+
+function buildScene(useTerrain){
   while(modelGroup.children.length) modelGroup.remove(modelGroup.children[0]);
-  const { osm, project } = lastOsmData;
+  const { osm, project, elevSampler } = lastOsmData;
   const st = currentSettings();
+  const terrainOn = !!(useTerrain && elevSampler);
 
   // --- границы участка в метрах (для земли и радиуса камеры) ---
   const c0 = project(currentBBox.south, currentBBox.west);
@@ -625,17 +756,25 @@ function buildScene(){
   const w = (maxX-minX)*1.15, h=(maxY-minY)*1.15;
   modelRadius = Math.max(20, Math.sqrt(w*w+h*h)/2);
 
-  // --- земля ---
-  const groundGeo = new THREE.PlaneGeometry(w, h);
-  groundGeo.rotateX(-Math.PI/2);
-  const groundMesh = new THREE.Mesh(groundGeo, new THREE.MeshLambertMaterial({ color: st.groundColor }));
-  groundMesh.position.set(cx, Z.ground, -cy);
-  groundMesh.userData.layer = 'ground';
+  // --- земля (плоская или по рельефу) ---
+  let groundMesh;
+  if(terrainOn){
+    groundMesh = buildTerrainGround(w, h, cx, cy, 32, elevSampler, st.groundColor);
+  } else {
+    const groundGeo = new THREE.PlaneGeometry(w, h);
+    groundGeo.rotateX(-Math.PI/2);
+    groundMesh = new THREE.Mesh(groundGeo, new THREE.MeshLambertMaterial({ color: st.groundColor }));
+    groundMesh.position.set(cx, Z.ground, -cy);
+    groundMesh.userData.layer = 'ground';
+  }
   modelGroup.add(groundMesh);
+
+  const elevAt = (mx,my) => terrainOn ? elevSampler(mx,my) : 0;
 
   // --- здания (с корректной сборкой мультиполигонов) ---
   const buildingPolys = collectPolygons(osm, tags => !!tags.building && tags.building!=='no');
   const projectedBuildings = projectPolygonSet(buildingPolys, project);
+  let buildingCount = 0;
   for(const b of projectedBuildings){
     const cat = classify(b.tags);
     const catSet = st.cats[cat];
@@ -652,8 +791,21 @@ function buildScene(){
       const roofMat = new THREE.MeshLambertMaterial({ color: shiftBrightness(catSet.color, +14) });
       const mesh = new THREE.Mesh(geo, [wallMat, roofMat]);
       mesh.userData.layer = cat;
+      mesh.userData.footprint = { outer: sh.outer, holes: sh.holes };
+      mesh.userData.height = height;
+      mesh.userData.baseColor = catSet.color;
+      if(terrainOn){
+        const c = polygonCentroid(sh.outer);
+        mesh.position.y = elevAt(c.x, c.y);
+      }
       modelGroup.add(mesh);
+      buildingCount++;
     }
+  }
+  buildingEditableEnabled = buildingCount > 0 && buildingCount <= BUILDING_MAX_EDIT;
+  closeBuildingEditor();
+  if(buildingEditableEnabled){
+    log(`Режим редактирования зданий активен (${buildingCount} шт. ≤ ${BUILDING_MAX_EDIT}) — кликни по зданию.`);
   }
 
   // --- водоёмы (тоже через мультиполигон-сборку) ---
@@ -668,6 +820,33 @@ function buildScene(){
         const mat = new THREE.MeshLambertMaterial({ color: st.waterColor });
         const mesh = new THREE.Mesh(geo, mat);
         mesh.userData.layer = 'water';
+        if(terrainOn){
+          const c = polygonCentroid(sh.outer);
+          mesh.position.y = elevAt(c.x, c.y);
+        }
+        modelGroup.add(mesh);
+      }
+    }
+  }
+
+  // --- парки / леса: невысокие полупрозрачные зелёные боксы ---
+  if(st.parksOn){
+    const parkPolys = collectPolygons(osm, tags =>
+      tags.leisure==='park' || tags.landuse==='forest' || tags.natural==='wood');
+    const projectedParks = projectPolygonSet(parkPolys, project);
+    for(const ppoly of projectedParks){
+      for(const sh of ppoly.shapes){
+        if(sh.outer.length < 3) continue;
+        const geo = shapeToGeometry(sh.outer, sh.holes, 1.4);
+        const mat = new THREE.MeshLambertMaterial({
+          color: st.parksColor, transparent:true, opacity:0.45, depthWrite:false
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.userData.layer = 'parks';
+        if(terrainOn){
+          const c = polygonCentroid(sh.outer);
+          mesh.position.y = elevAt(c.x, c.y);
+        }
         modelGroup.add(mesh);
       }
     }
@@ -697,6 +876,9 @@ function buildScene(){
         geo.translate(0, Z.road, 0);
         const mesh = new THREE.Mesh(geo, roadMat);
         mesh.userData.layer = 'roads';
+        if(terrainOn){
+          mesh.position.y = elevAt((p1.x+p2.x)/2, (p1.y+p2.y)/2);
+        }
         modelGroup.add(mesh);
       }
     }
@@ -707,21 +889,41 @@ function buildScene(){
 }
 
 document.getElementById('btnApplyColors').addEventListener('click', ()=>{
-  if(lastOsmData) buildScene();
+  if(lastOsmData) buildScene(lastUseTerrain);
 });
 
 /* =========================================================================
    9. ЭКСПОРТ В SVG (с фиксами под Illustrator)
    ========================================================================= */
-const LAYER_ORDER  = ['ground','water','roads','residential','commercial','education','industrial','religious','other'];
-const LAYER_LABELS = { ground:'Земля', water:'Водоёмы', roads:'Дороги', residential:'Жилые',
+const LAYER_ORDER  = ['ground','water','parks','roads','residential','commercial','education','industrial','religious','other'];
+const LAYER_LABELS = { ground:'Земля', water:'Водоёмы', parks:'Парки / леса', roads:'Дороги', residential:'Жилые',
   commercial:'Коммерция / офисы', education:'Образование', industrial:'Промышленность',
   religious:'Религиозные', other:'Прочие здания' };
+const BUILDING_LAYERS = ['residential','commercial','education','industrial','religious','other'];
+
+/* Вырезает из индексированной геометрии только один materialIndex-группу
+   (используется, чтобы при экспорте "строго сверху + ортографич." не
+   тащить в SVG боковые стены зданий — только крышу). */
+function extractMaterialGroup(geo, materialIndex){
+  const group = (geo.groups||[]).find(g=>g.materialIndex===materialIndex);
+  if(!group || !geo.index) return null;
+  const newGeo = new THREE.BufferGeometry();
+  newGeo.setAttribute('position', geo.attributes.position);
+  if(geo.attributes.normal) newGeo.setAttribute('normal', geo.attributes.normal);
+  if(geo.attributes.uv) newGeo.setAttribute('uv', geo.attributes.uv);
+  const idxArr = geo.index.array.slice(group.start, group.start + group.count);
+  newGeo.setIndex(Array.from(idxArr));
+  return newGeo;
+}
 
 /* Рендерит ОДИН слой (набор мешей одной категории) отдельным проходом SVGRenderer
    и оборачивает результат в <g id="layer-..."> — так Illustrator при импорте
    распознаёт каждую категорию как отдельный слой. */
-function renderLayerToGroup(layerKey, meshes, w, h, camera){
+function renderLayerToGroup(layerKey, meshes, w, h, camera, opts){
+  opts = opts || {};
+  const roofOnly = !!opts.roofOnly;
+  const opacity = opts.opacity != null ? opts.opacity : 1;
+
   const svgRenderer = new SVGRenderer();
   svgRenderer.setSize(w,h);
   svgRenderer.setQuality('high');
@@ -738,29 +940,52 @@ function renderLayerToGroup(layerKey, meshes, w, h, camera){
   const grp = new THREE.Group();
   for(const m of meshes){
     const clone = m.clone();
+    let srcGeo = clone.geometry;
+    let materialColor;
+
+    if(roofOnly && Array.isArray(m.material)){
+      // строго сверху + ортографич. — стены (materialIndex 0) не нужны, берём только крышу (1)
+      const roofGeo = extractMaterialGroup(srcGeo, 1);
+      if(!roofGeo) continue;
+      srcGeo = roofGeo;
+      materialColor = m.material[1].color.getHex();
+    } else {
+      materialColor = Array.isArray(m.material) ? null : m.material.color.getHex();
+    }
+
     // сварка вершин (mergeVertices) убирает микрощели между соседними гранями,
     // НЕ трогая нормали разных граней (у них разные normal -> не сольются),
     // поэтому крыша/стены по-прежнему освещаются по-разному (Lambert)
-    let geo = clone.geometry.toNonIndexed();
+    let geo = srcGeo.toNonIndexed();
     geo = BufferGeometryUtils.mergeVertices(geo, 1e-4);
     geo.computeVertexNormals();
     clone.geometry = geo;
-    clone.material = Array.isArray(m.material)
-      ? m.material.map(mm => new THREE.MeshLambertMaterial({ color: mm.color.getHex() }))
-      : new THREE.MeshLambertMaterial({ color: m.material.color.getHex() });
+
+    if(materialColor !== null){
+      clone.material = new THREE.MeshLambertMaterial({ color: materialColor });
+    } else {
+      clone.material = m.material.map(mm => new THREE.MeshLambertMaterial({ color: mm.color.getHex() }));
+    }
     grp.add(clone);
   }
+  if(!grp.children.length) return null;
   scene.add(grp);
   svgRenderer.render(scene, camera);
   const svgEl = svgRenderer.domElement;
 
-  // обводка = заливке — скрывает оставшиеся волосяные щели на стыках треугольников
+  // обводка = заливке — скрывает оставшиеся волосяные щели на стыках треугольников;
+  // для полупрозрачных слоёв (парки) дублируем прозрачность через fill-opacity,
+  // т.к. SVGRenderer не всегда сам её проставляет.
   svgEl.querySelectorAll('path').forEach(p=>{
     const fill = p.getAttribute('fill');
     if(fill && fill !== 'none'){
       p.setAttribute('stroke', fill);
       p.setAttribute('stroke-width', '0.6');
       p.setAttribute('stroke-linejoin', 'round');
+      if(opacity < 1){
+        p.setAttribute('fill-opacity', String(opacity));
+        p.setAttribute('stroke-opacity', String(opacity));
+      }
     }
   });
 
@@ -779,6 +1004,10 @@ document.getElementById('btnExportSVG').addEventListener('click', ()=>{
   if(!modelGroup.children.length){ alert('Сначала сгенерируй 3D-модель'); return; }
 
   const w = container.clientWidth, h = container.clientHeight;
+  // "строго сверху" + "ортографич." одновременно -> стены зданий вырождаются
+  // в линии нулевой площади и только мусорят SVG, поэтому в этом режиме
+  // экспортируем зданиям только крышу.
+  const roofOnlyMode = camState.mode === 'ortho' && camState.elevation >= 89.5;
 
   const byLayer = {};
   modelGroup.children.forEach(m=>{
@@ -791,7 +1020,11 @@ document.getElementById('btnExportSVG').addEventListener('click', ()=>{
   for(const key of LAYER_ORDER){
     const meshes = byLayer[key];
     if(!meshes || !meshes.length) continue;
-    const result = renderLayerToGroup(key, meshes, w, h, activeCam);
+    const result = renderLayerToGroup(key, meshes, w, h, activeCam, {
+      roofOnly: roofOnlyMode && BUILDING_LAYERS.includes(key),
+      opacity: key === 'parks' ? 0.45 : 1
+    });
+    if(!result) continue;
     groups.push(result.g);
     if(!rootAttrs) rootAttrs = result;
   }
@@ -814,6 +1047,66 @@ document.getElementById('btnExportSVG').addEventListener('click', ()=>{
   a.download = `osm3d_export_${Date.now()}.svg`;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
+});
+
+/* =========================================================================
+   10. РЕДАКТОР ЗДАНИЙ ПО КЛИКУ (только когда зданий ≤ 25)
+   ========================================================================= */
+const editorEl = document.getElementById('buildingEditor');
+const editHeightEl = document.getElementById('editHeight');
+const editColorEl = document.getElementById('editColor');
+let selectedBuilding = null;
+
+function openBuildingEditor(mesh){
+  selectedBuilding = mesh;
+  editHeightEl.value = mesh.userData.height.toFixed(1);
+  editColorEl.value = mesh.userData.baseColor;
+  editorEl.style.display = 'block';
+}
+function closeBuildingEditor(){
+  selectedBuilding = null;
+  editorEl.style.display = 'none';
+}
+document.getElementById('editClose').addEventListener('click', closeBuildingEditor);
+document.getElementById('editApply').addEventListener('click', ()=>{
+  if(!selectedBuilding) return;
+  const newHeight = Math.max(1, parseFloat(editHeightEl.value) || selectedBuilding.userData.height);
+  const newColor = editColorEl.value;
+  const fp = selectedBuilding.userData.footprint;
+
+  const newGeo = shapeToGeometry(fp.outer, fp.holes, newHeight);
+  selectedBuilding.geometry.dispose();
+  selectedBuilding.geometry = newGeo;
+
+  if(Array.isArray(selectedBuilding.material)) selectedBuilding.material.forEach(m=>m.dispose());
+  selectedBuilding.material = [
+    new THREE.MeshLambertMaterial({ color: shiftBrightness(newColor, -12) }),
+    new THREE.MeshLambertMaterial({ color: shiftBrightness(newColor, +14) })
+  ];
+  selectedBuilding.userData.height = newHeight;
+  selectedBuilding.userData.baseColor = newColor;
+});
+
+// клик (без учёта вращения камеры мышью) по мешу здания -> открыть редактор
+const raycaster = new THREE.Raycaster();
+const mouseNDC = new THREE.Vector2();
+let pointerDownPos = null;
+renderer.domElement.addEventListener('pointerdown', (e)=>{ pointerDownPos = { x:e.clientX, y:e.clientY }; });
+renderer.domElement.addEventListener('pointerup', (e)=>{
+  if(!pointerDownPos) return;
+  const moved = Math.hypot(e.clientX-pointerDownPos.x, e.clientY-pointerDownPos.y);
+  pointerDownPos = null;
+  if(moved > 5) return; // это было вращение камеры (OrbitControls), не клик
+  if(!buildingEditableEnabled) return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouseNDC.x = ((e.clientX-rect.left)/rect.width)*2 - 1;
+  mouseNDC.y = -((e.clientY-rect.top)/rect.height)*2 + 1;
+  raycaster.setFromCamera(mouseNDC, activeCam);
+
+  const buildingMeshes = modelGroup.children.filter(m=>m.userData.footprint);
+  const hits = raycaster.intersectObjects(buildingMeshes, false);
+  if(hits.length) openBuildingEditor(hits[0].object);
 });
 
 applyCameraState();
