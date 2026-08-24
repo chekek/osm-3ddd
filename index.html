@@ -850,33 +850,38 @@ function buildScene(useTerrain){
     }
   }
 
-  // --- дороги: лента вдоль линии, приподнята над землёй ---
+  // --- дороги: лента вдоль линии, каждый угол сегмента сэмплирует рельеф отдельно
+  //     (а не весь сегмент целиком одной высотой) — соседние сегменты делят общую
+  //     вершину в одних и тех же (x,y), поэтому высоты в стыке совпадают сами собой ---
   if(st.roadsOn){
     for(const [id, way] of osm.ways){
       if(!way.tags.highway) continue;
       const pts = way.nodes.map(nid=>osm.nodes.get(nid)).filter(Boolean).map(p=>project(p.lat,p.lon));
       if(pts.length < 2) continue;
       const width = ROAD_WIDTH[way.tags.highway] ?? 4;
-      const roadMat = new THREE.MeshLambertMaterial({ color: st.roadColor });
+      const roadMat = new THREE.MeshLambertMaterial({ color: st.roadColor, side: THREE.DoubleSide });
       for(let i=0;i<pts.length-1;i++){
         const p1=pts[i], p2=pts[i+1];
         const dx=p2.x-p1.x, dy=p2.y-p1.y;
         const len=Math.hypot(dx,dy); if(len<0.01) continue;
         const nx=-dy/len*width/2, ny=dx/len*width/2;
-        const shape = new THREE.Shape([
-          new THREE.Vector2(p1.x+nx, p1.y+ny),
-          new THREE.Vector2(p2.x+nx, p2.y+ny),
-          new THREE.Vector2(p2.x-nx, p2.y-ny),
-          new THREE.Vector2(p1.x-nx, p1.y-ny),
-        ]);
-        const geo = new THREE.ExtrudeGeometry(shape, { depth:0.08, bevelEnabled:false, curveSegments:1 });
-        geo.rotateX(-Math.PI/2);
-        geo.translate(0, Z.road, 0);
+        const corners = [
+          { x:p1.x+nx, y:p1.y+ny }, { x:p2.x+nx, y:p2.y+ny },
+          { x:p2.x-nx, y:p2.y-ny }, { x:p1.x-nx, y:p1.y-ny }
+        ];
+        const positions = new Float32Array(12);
+        corners.forEach((c,k)=>{
+          const elev = terrainOn ? elevAt(c.x, c.y) : 0;
+          positions[k*3]   = c.x;
+          positions[k*3+1] = elev + Z.road;
+          positions[k*3+2] = -c.y;
+        });
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geo.setIndex([0,1,2, 0,2,3]);
+        geo.computeVertexNormals();
         const mesh = new THREE.Mesh(geo, roadMat);
         mesh.userData.layer = 'roads';
-        if(terrainOn){
-          mesh.position.y = elevAt((p1.x+p2.x)/2, (p1.y+p2.y)/2);
-        }
         modelGroup.add(mesh);
       }
     }
