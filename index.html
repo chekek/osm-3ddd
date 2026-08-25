@@ -62,6 +62,11 @@
     border-radius:8px;padding:10px;min-width:180px;backdrop-filter:blur(4px);z-index:11;
   }
   #buildingEditor .row label{color:var(--muted);font-size:12px;}
+  .map-label{ font-family:'Segoe UI',Arial,sans-serif; color:#1a1a1a; white-space:nowrap;
+    text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 3px #fff; pointer-events:none; }
+  .map-label.place{ font-size:15px; font-weight:700; letter-spacing:.02em; }
+  .map-label.street{ font-size:11px; font-style:italic; color:#333; }
+  .map-label.house{ font-size:9px; color:#444; }
 </style>
 </head>
 <body>
@@ -88,11 +93,19 @@
       <div class="row"><input type="checkbox" id="catOther" checked><label for="catOther">Прочие здания</label><input type="color" id="colOther" value="#bcbcbc"></div>
       <div class="row"><input type="checkbox" id="catRoads" checked><label for="catRoads">Дороги</label><input type="color" id="colRoads" value="#3a3a3a"></div>
       <div class="row"><input type="checkbox" id="catWater" checked><label for="catWater">Водоёмы</label><input type="color" id="colWater" value="#5f9ea8"></div>
-      <div class="row"><input type="checkbox" id="catParks" checked><label for="catParks">Парки / леса (полупрозр.)</label><input type="color" id="colParks" value="#4caf6a"></div>
+      <div class="row"><input type="checkbox" id="catParks" checked><label for="catParks">Парки (5-6 эт., полупрозр.)</label><input type="color" id="colParks" value="#4caf6a"></div>
+      <div class="row"><input type="checkbox" id="catForest" checked><label for="catForest">Леса (7-8 эт., полупрозр.)</label><input type="color" id="colForest" value="#2f7d4a"></div>
       <div class="row"><label>Земля (поверхность)</label><input type="color" id="colGround" value="#e9e5da"></div>
       <button id="btnApplyColors" style="width:100%;">Применить цвета / фильтр</button>
 
-      <h3>3. Камера</h3>
+      <h3>3. Подписи</h3>
+      <div class="row"><input type="checkbox" id="catLabelPlaces" checked><label for="catLabelPlaces">Нас. пункты / районы</label></div>
+      <div class="row"><input type="checkbox" id="catLabelStreets" checked><label for="catLabelStreets">Улицы</label></div>
+      <div class="row"><input type="checkbox" id="catLabelHouses" checked><label for="catLabelHouses">Номера домов</label></div>
+      <div class="row"><input type="checkbox" id="catLabelsShow3D" checked><label for="catLabelsShow3D">Показывать в 3D-виде</label></div>
+      <small class="hint">Источник: place-ноды OSM (город/район/пригород), tags.name у дорог, addr:housenumber у зданий.</small>
+
+      <h3>4. Камера</h3>
       <div class="grid4">
         <button class="fovBtn" data-f="18">18мм</button>
         <button class="fovBtn" data-f="35">35мм</button>
@@ -112,17 +125,29 @@
       <div class="row"><label>Zoom (для ортографич.): <span id="zoomVal">1.00</span>×</label></div>
       <input type="range" id="orthoZoom" min="20" max="500" value="100">
 
-      <h3>4. Параметры ракурса (переносимые)</h3>
-      <small class="hint">Скопируй JSON — вставь в это же поле на другом участке карты и жми «Применить», чтобы получить идентичный угол съёмки.</small>
+      <h3>5. Параметры ракурса (переносимые)</h3>
+      <small class="hint">Скопируй JSON — вставь в это же поле на другом участке карты и жми «Применить», чтобы получить идентичный угол съёмки (только камера, без цветов).</small>
       <textarea id="camParams" rows="6" readonly></textarea>
       <div class="grid2" style="margin-top:5px;">
         <button id="btnCopyParams">Копировать</button>
         <button id="btnApplyParams">Применить JSON →</button>
       </div>
 
-      <h3>5. Экспорт</h3>
+      <h3>6. Пресеты (камера + цвета)</h3>
+      <small class="hint">Сохраняет и ракурс камеры, и все выбранные цвета/фильтры разом. Хранится в этом браузере.</small>
+      <select id="presetSelect" style="margin:4px 0;"></select>
+      <div class="grid2">
+        <button id="btnPresetApply">Применить</button>
+        <button id="btnPresetDelete">Удалить</button>
+      </div>
+      <div class="row" style="margin-top:6px;">
+        <input type="text" id="presetName" placeholder="Название пресета">
+      </div>
+      <button class="primary" id="btnPresetSave" style="width:100%;">💾 Сохранить как пресет</button>
+
+      <h3>7. Экспорт</h3>
       <button class="primary" id="btnExportSVG" style="width:100%;">⬇ Сохранить SVG</button>
-      <small class="hint">Экспорт использует mergeVertices и overdraw=0, обводка = заливке (устраняет «рваные» углы при импорте в Illustrator).</small>
+      <small class="hint">Экспорт использует mergeVertices и overdraw=0, обводка = заливке (устраняет «рваные» углы при импорте в Illustrator). Подписи идут отдельными слоями.</small>
     </div>
   </div>
 
@@ -166,6 +191,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { SVGRenderer } from 'three/addons/renderers/SVGRenderer.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 
 /* =========================================================================
    1. КАРТА ВЫБОРА УЧАСТКА (Leaflet + leaflet-draw)
@@ -220,6 +246,7 @@ async function fetchOsmData(bbox){
       relation["landuse"="forest"](${bboxStr});
       way["natural"="wood"](${bboxStr});
       relation["natural"="wood"](${bboxStr});
+      node["place"](${bboxStr});
     );
     out body;
     >;
@@ -237,13 +264,17 @@ function parseOsm(json){
   const nodes = new Map();   // id -> {lat,lon}
   const ways = new Map();    // id -> {nodes:[ids], tags}
   const relations = [];      // {tags, members:[{type,ref,role}]}
+  const placeNodes = [];     // {lat,lon,tags} — ноды с place=city/town/village/suburb и т.д.
 
   for(const el of json.elements){
-    if(el.type === 'node') nodes.set(el.id, {lat:el.lat, lon:el.lon});
+    if(el.type === 'node'){
+      nodes.set(el.id, {lat:el.lat, lon:el.lon});
+      if(el.tags && el.tags.place && el.tags.name) placeNodes.push({ lat:el.lat, lon:el.lon, tags: el.tags });
+    }
     else if(el.type === 'way') ways.set(el.id, {nodes: el.nodes || [], tags: el.tags || {}});
     else if(el.type === 'relation') relations.push({ id: el.id, tags: el.tags || {}, members: el.members || [] });
   }
-  return { nodes, ways, relations };
+  return { nodes, ways, relations, placeNodes };
 }
 
 /* Сшивка фрагментов путей в замкнутые кольца.
@@ -527,6 +558,13 @@ const renderer = new THREE.WebGLRenderer({ antialias:true });
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 container.appendChild(renderer.domElement);
 
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.domElement.style.position = 'absolute';
+labelRenderer.domElement.style.top = '0';
+labelRenderer.domElement.style.left = '0';
+labelRenderer.domElement.style.pointerEvents = 'none';
+container.appendChild(labelRenderer.domElement);
+
 const controls = new OrbitControls(activeCam, renderer.domElement);
 controls.enableDamping = true;
 
@@ -537,10 +575,13 @@ scene.add(sun);
 
 const modelGroup = new THREE.Group();
 scene.add(modelGroup);
+const labelGroup = new THREE.Group();
+scene.add(labelGroup);
 
 function resize(){
   const w = container.clientWidth, h = container.clientHeight;
   renderer.setSize(w,h);
+  labelRenderer.setSize(w,h);
   perspCam.aspect = w/h; perspCam.updateProjectionMatrix();
   const asp = w/h;
   const half = (orthoCam.top);
@@ -671,6 +712,7 @@ function animate(){
   requestAnimationFrame(animate);
   controls.update();
   renderer.render(scene, activeCam);
+  labelRenderer.render(scene, activeCam);
   updateHud();
 }
 resize();
@@ -682,6 +724,7 @@ animate();
 let lastOsmData = null; // сохраняем распарсенные данные, чтобы перекрашивать без повторной загрузки
 let lastUseTerrain = false;
 let buildingEditableEnabled = false;
+let currentLabels = { places:[], streets:[], houses:[] }; // для SVG-экспорта подписей
 
 async function loadAndBuild(useTerrain){
   if(!currentBBox){ alert('Сначала нарисуй прямоугольник на карте (кнопка ▭)'); return; }
@@ -733,6 +776,8 @@ function currentSettings(){
     waterColor: document.getElementById('colWater').value,
     parksOn: document.getElementById('catParks').checked,
     parksColor: document.getElementById('colParks').value,
+    forestOn: document.getElementById('catForest').checked,
+    forestColor: document.getElementById('colForest').value,
     groundColor: document.getElementById('colGround').value,
   };
 }
@@ -769,6 +814,44 @@ function buildScene(useTerrain){
 
   const elevAt = (mx,my) => terrainOn ? elevSampler(mx,my) : 0;
 
+  // --- подписи: очищаем предыдущие, готовим сбор данных для 3D-превью и SVG-экспорта ---
+  while(labelGroup.children.length) labelGroup.remove(labelGroup.children[0]);
+  const labelSettings = {
+    places:  document.getElementById('catLabelPlaces').checked,
+    streets: document.getElementById('catLabelStreets').checked,
+    houses:  document.getElementById('catLabelHouses').checked,
+    show3D:  document.getElementById('catLabelsShow3D').checked,
+  };
+  currentLabels = { places:[], streets:[], houses:[] };
+  function addLabel(listKey, mx, my, worldY, text, cssClass){
+    if(!text) return;
+    currentLabels[listKey].push({ x:mx, y:my, worldY, text });
+    if(labelSettings.show3D){
+      const div = document.createElement('div');
+      div.className = 'map-label ' + cssClass;
+      div.textContent = text;
+      const obj = new CSS2DObject(div);
+      obj.position.set(mx, worldY, -my);
+      labelGroup.add(obj);
+    }
+  }
+
+  if(labelSettings.places){
+    for(const pn of osm.placeNodes){
+      const p = project(pn.lat, pn.lon);
+      addLabel('places', p.x, p.y, elevAt(p.x,p.y)+2, pn.tags.name, 'place');
+    }
+  }
+  if(labelSettings.streets){
+    for(const [id, way] of osm.ways){
+      if(!way.tags.highway || !way.tags.name) continue;
+      const wpts = way.nodes.map(nid=>osm.nodes.get(nid)).filter(Boolean).map(p=>project(p.lat,p.lon));
+      if(!wpts.length) continue;
+      const mid = wpts[Math.floor(wpts.length/2)];
+      addLabel('streets', mid.x, mid.y, elevAt(mid.x,mid.y)+1.2, way.tags.name, 'street');
+    }
+  }
+
   // --- здания (с корректной сборкой мультиполигонов) ---
   const buildingPolys = collectPolygons(osm, tags => !!tags.building && tags.building!=='no');
   const projectedBuildings = projectPolygonSet(buildingPolys, project);
@@ -785,16 +868,20 @@ function buildScene(useTerrain){
       // materialIndex 1 = крышка (верх+низ). Даём им чуть разную яркость от базового
       // цвета категории — плюс дополнительная разница между стенами появится
       // естественным образом от направленного света (Lambert).
-      const wallMat = new THREE.MeshLambertMaterial({ color: shiftBrightness(catSet.color, -12) });
-      const roofMat = new THREE.MeshLambertMaterial({ color: shiftBrightness(catSet.color, +14) });
+      // Выбранный в панели цвет — это цвет КРЫШИ (materialIndex 1) без изменений;
+      // стены (materialIndex 0) всегда темнее базового цвета.
+      const wallMat = new THREE.MeshLambertMaterial({ color: shiftBrightness(catSet.color, -18) });
+      const roofMat = new THREE.MeshLambertMaterial({ color: catSet.color });
       const mesh = new THREE.Mesh(geo, [wallMat, roofMat]);
       mesh.userData.layer = cat;
       mesh.userData.footprint = { outer: sh.outer, holes: sh.holes };
       mesh.userData.height = height;
       mesh.userData.baseColor = catSet.color;
-      if(terrainOn){
-        const c = polygonCentroid(sh.outer);
-        mesh.position.y = elevAt(c.x, c.y);
+      const centroid = polygonCentroid(sh.outer);
+      const baseY = elevAt(centroid.x, centroid.y);
+      if(terrainOn) mesh.position.y = baseY;
+      if(labelSettings.houses && b.tags['addr:housenumber']){
+        addLabel('houses', centroid.x, centroid.y, baseY + 0.6, b.tags['addr:housenumber'], 'house');
       }
       modelGroup.add(mesh);
       buildingCount++;
@@ -827,20 +914,24 @@ function buildScene(useTerrain){
     }
   }
 
-  // --- парки / леса: невысокие полупрозрачные зелёные боксы ---
-  if(st.parksOn){
-    const parkPolys = collectPolygons(osm, tags =>
-      tags.leisure==='park' || tags.landuse==='forest' || tags.natural==='wood');
-    const projectedParks = projectPolygonSet(parkPolys, project);
-    for(const ppoly of projectedParks){
-      for(const sh of ppoly.shapes){
+  // --- парки (5-6 этажей) и леса (7-8 этажей): полупрозрачные зелёные боксы ---
+  const FLOOR_H = 3.1;
+  const PARK_HEIGHT   = 5.5 * FLOOR_H;  // ~17м
+  const FOREST_HEIGHT = 7.5 * FLOOR_H;  // ~23м
+
+  function buildGreenery(tagFilter, height, color, layerKey){
+    if(!color) return;
+    const polys = collectPolygons(osm, tagFilter);
+    const projected = projectPolygonSet(polys, project);
+    for(const poly of projected){
+      for(const sh of poly.shapes){
         if(sh.outer.length < 3) continue;
-        const geo = shapeToGeometry(sh.outer, sh.holes, 1.4);
+        const geo = shapeToGeometry(sh.outer, sh.holes, height);
         const mat = new THREE.MeshLambertMaterial({
-          color: st.parksColor, transparent:true, opacity:0.45, depthWrite:false
+          color, transparent:true, opacity:0.45, depthWrite:false, side:THREE.DoubleSide
         });
         const mesh = new THREE.Mesh(geo, mat);
-        mesh.userData.layer = 'parks';
+        mesh.userData.layer = layerKey;
         if(terrainOn){
           const c = polygonCentroid(sh.outer);
           mesh.position.y = elevAt(c.x, c.y);
@@ -849,6 +940,8 @@ function buildScene(useTerrain){
       }
     }
   }
+  if(st.parksOn)  buildGreenery(tags => tags.leisure==='park', PARK_HEIGHT, st.parksColor, 'parks');
+  if(st.forestOn) buildGreenery(tags => tags.landuse==='forest' || tags.natural==='wood', FOREST_HEIGHT, st.forestColor, 'forest');
 
   // --- дороги: лента вдоль линии, каждый угол сегмента сэмплирует рельеф отдельно
   //     (а не весь сегмент целиком одной высотой) — соседние сегменты делят общую
@@ -878,7 +971,7 @@ function buildScene(useTerrain){
         });
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geo.setIndex([0,1,2, 0,2,3]);
+        geo.setIndex([0,2,1, 0,3,2]); // такой порядок даёт нормаль вверх (см. пояснение выше по вычислению)
         geo.computeVertexNormals();
         const mesh = new THREE.Mesh(geo, roadMat);
         mesh.userData.layer = 'roads';
@@ -896,10 +989,108 @@ document.getElementById('btnApplyColors').addEventListener('click', ()=>{
 });
 
 /* =========================================================================
+   8б. ПРЕСЕТЫ: камера + все цвета/фильтры одним набором (localStorage)
+   ========================================================================= */
+const PRESET_INPUT_IDS = [
+  'catResidential','colResidential','catCommercial','colCommercial','catEducation','colEducation',
+  'catIndustrial','colIndustrial','catReligious','colReligious','catOther','colOther',
+  'catRoads','colRoads','catWater','colWater','catParks','colParks','catForest','colForest','colGround',
+  'catLabelPlaces','catLabelStreets','catLabelHouses','catLabelsShow3D'
+];
+function collectPresetInputs(){
+  const obj = {};
+  for(const id of PRESET_INPUT_IDS){
+    const el = document.getElementById(id);
+    if(!el) continue;
+    obj[id] = (el.type === 'checkbox') ? el.checked : el.value;
+  }
+  return obj;
+}
+function applyPresetInputs(obj){
+  for(const id in obj){
+    const el = document.getElementById(id);
+    if(!el) continue;
+    if(el.type === 'checkbox') el.checked = obj[id]; else el.value = obj[id];
+  }
+}
+function loadPresetsStore(){
+  try{ return JSON.parse(localStorage.getItem('osm3d_presets_v1') || '{}'); }catch(e){ return {}; }
+}
+function savePresetsStore(store){ localStorage.setItem('osm3d_presets_v1', JSON.stringify(store)); }
+function refreshPresetSelect(){
+  const store = loadPresetsStore();
+  const sel = document.getElementById('presetSelect');
+  const names = Object.keys(store);
+  sel.innerHTML = names.length
+    ? names.map(n=>`<option value="${n}">${n}</option>`).join('')
+    : '<option value="">— нет пресетов —</option>';
+}
+refreshPresetSelect();
+
+document.getElementById('btnPresetSave').addEventListener('click', ()=>{
+  const name = document.getElementById('presetName').value.trim();
+  if(!name){ alert('Введи название пресета'); return; }
+  const store = loadPresetsStore();
+  store[name] = {
+    camera: { mode:camState.mode, focal:camState.focal, azimuth:camState.azimuth,
+      elevation:camState.elevation, distFactor:camState.distFactor, orthoZoom:camState.orthoZoom },
+    inputs: collectPresetInputs()
+  };
+  savePresetsStore(store);
+  refreshPresetSelect();
+  document.getElementById('presetSelect').value = name;
+  document.getElementById('presetName').value = '';
+  log(`Пресет «${name}» сохранён.`);
+});
+
+document.getElementById('btnPresetApply').addEventListener('click', ()=>{
+  const name = document.getElementById('presetSelect').value;
+  if(!name) return;
+  const preset = loadPresetsStore()[name];
+  if(!preset) return;
+
+  applyPresetInputs(preset.inputs);
+
+  camState.mode = preset.camera.mode;
+  camState.focal = preset.camera.focal;
+  camState.azimuth = preset.camera.azimuth;
+  camState.elevation = preset.camera.elevation;
+  camState.distFactor = preset.camera.distFactor;
+  camState.orthoZoom = preset.camera.orthoZoom;
+
+  document.getElementById('azimuth').value = camState.azimuth;
+  document.getElementById('azVal').textContent = camState.azimuth;
+  document.getElementById('elevation').value = camState.elevation;
+  document.getElementById('elVal').textContent = camState.elevation;
+  document.getElementById('distance').value = camState.distFactor*100;
+  document.getElementById('distVal').textContent = camState.distFactor.toFixed(2);
+  document.getElementById('orthoZoom').value = camState.orthoZoom*100;
+  document.getElementById('zoomVal').textContent = camState.orthoZoom.toFixed(2);
+  document.querySelectorAll('.fovBtn').forEach(b=>{
+    b.classList.toggle('active', +b.dataset.f === camState.focal && camState.mode !== 'ortho');
+  });
+  document.getElementById('btnOrtho').classList.toggle('active', camState.mode === 'ortho');
+
+  applyCameraState();
+  if(lastOsmData) buildScene(lastUseTerrain);
+  log(`Пресет «${name}» применён.`);
+});
+
+document.getElementById('btnPresetDelete').addEventListener('click', ()=>{
+  const name = document.getElementById('presetSelect').value;
+  if(!name) return;
+  if(!confirm(`Удалить пресет «${name}»?`)) return;
+  const store = loadPresetsStore();
+  delete store[name];
+  savePresetsStore(store);
+  refreshPresetSelect();
+});
+
+/* =========================================================================
    9. ЭКСПОРТ В SVG (с фиксами под Illustrator)
    ========================================================================= */
-const LAYER_ORDER  = ['ground','water','parks','roads','residential','commercial','education','industrial','religious','other'];
-const LAYER_LABELS = { ground:'Земля', water:'Водоёмы', parks:'Парки / леса', roads:'Дороги', residential:'Жилые',
+const LAYER_ORDER  = ['ground','water','parks','forest','roads','residential','commercial','education','industrial','religious','other'];
+const LAYER_LABELS = { ground:'Земля', water:'Водоёмы', parks:'Парки', forest:'Леса', roads:'Дороги', residential:'Жилые',
   commercial:'Коммерция / офисы', education:'Образование', industrial:'Промышленность',
   religious:'Религиозные', other:'Прочие здания' };
 const BUILDING_LAYERS = ['residential','commercial','education','industrial','religious','other'];
@@ -965,9 +1156,10 @@ function renderLayerToGroup(layerKey, meshes, w, h, camera, opts){
     clone.geometry = geo;
 
     if(materialColor !== null){
-      clone.material = new THREE.MeshLambertMaterial({ color: materialColor });
+      const srcSide = Array.isArray(m.material) ? THREE.FrontSide : (m.material.side ?? THREE.FrontSide);
+      clone.material = new THREE.MeshLambertMaterial({ color: materialColor, side: srcSide });
     } else {
-      clone.material = m.material.map(mm => new THREE.MeshLambertMaterial({ color: mm.color.getHex() }));
+      clone.material = m.material.map(mm => new THREE.MeshLambertMaterial({ color: mm.color.getHex(), side: mm.side ?? THREE.FrontSide }));
     }
     grp.add(clone);
   }
@@ -1003,6 +1195,38 @@ function renderLayerToGroup(layerKey, meshes, w, h, camera, opts){
   return { g, width: svgEl.getAttribute('width'), height: svgEl.getAttribute('height'), viewBox: svgEl.getAttribute('viewBox') };
 }
 
+/* Проецирует мировую точку через текущую камеру в экранные SVG-координаты —
+   той же матрицей, которую использует WebGL-рендер, поэтому подписи не "плывут"
+   относительно остальных слоёв (частая причина смещения подписей при экспорте). */
+function projectToScreen(mx, worldY, worldZ, camera, w, h){
+  const v = new THREE.Vector3(mx, worldY, worldZ).project(camera);
+  return { x:(v.x+1)/2*w, y:(1-v.y)/2*h };
+}
+function renderLabelLayer(layerKey, list, w, h, camera, opts){
+  if(!list || !list.length) return null;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const g = document.createElementNS(svgNS, 'g');
+  g.setAttribute('id', 'layer-' + layerKey);
+  const title = document.createElementNS(svgNS, 'title');
+  title.textContent = opts.label;
+  g.appendChild(title);
+  for(const item of list){
+    const p = projectToScreen(item.x, item.worldY, -item.y, camera, w, h);
+    const t = document.createElementNS(svgNS, 'text');
+    t.setAttribute('x', p.x.toFixed(1));
+    t.setAttribute('y', p.y.toFixed(1));
+    t.setAttribute('font-size', opts.fontSize);
+    t.setAttribute('font-family', 'Arial, sans-serif');
+    if(opts.fontWeight) t.setAttribute('font-weight', opts.fontWeight);
+    if(opts.fontStyle) t.setAttribute('font-style', opts.fontStyle);
+    t.setAttribute('fill', opts.color);
+    t.setAttribute('text-anchor', 'middle');
+    t.textContent = item.text;
+    g.appendChild(t);
+  }
+  return g;
+}
+
 document.getElementById('btnExportSVG').addEventListener('click', ()=>{
   if(!modelGroup.children.length){ alert('Сначала сгенерируй 3D-модель'); return; }
 
@@ -1025,20 +1249,38 @@ document.getElementById('btnExportSVG').addEventListener('click', ()=>{
     if(!meshes || !meshes.length) continue;
     const result = renderLayerToGroup(key, meshes, w, h, activeCam, {
       roofOnly: roofOnlyMode && BUILDING_LAYERS.includes(key),
-      opacity: key === 'parks' ? 0.45 : 1
+      opacity: (key === 'parks' || key === 'forest') ? 0.45 : 1
     });
     if(!result) continue;
     groups.push(result.g);
     if(!rootAttrs) rootAttrs = result;
   }
+
+  // подписи — отдельные слои поверх всего, спроецированные той же камерой
+  if(document.getElementById('catLabelPlaces').checked){
+    const g = renderLabelLayer('labels-places', currentLabels.places, w, h, activeCam,
+      { label:'Подписи: нас. пункты', fontSize:15, fontWeight:'bold', color:'#111111' });
+    if(g) groups.push(g);
+  }
+  if(document.getElementById('catLabelStreets').checked){
+    const g = renderLabelLayer('labels-streets', currentLabels.streets, w, h, activeCam,
+      { label:'Подписи: улицы', fontSize:11, fontStyle:'italic', color:'#333333' });
+    if(g) groups.push(g);
+  }
+  if(document.getElementById('catLabelHouses').checked){
+    const g = renderLabelLayer('labels-houses', currentLabels.houses, w, h, activeCam,
+      { label:'Подписи: номера домов', fontSize:9, color:'#444444' });
+    if(g) groups.push(g);
+  }
+
   if(!groups.length){ alert('Нет объектов для экспорта — включи хотя бы один слой в разделе "Что рисовать"'); return; }
 
   const svgNS = 'http://www.w3.org/2000/svg';
   const root = document.createElementNS(svgNS, 'svg');
   root.setAttribute('xmlns', svgNS);
-  root.setAttribute('width', rootAttrs.width || w);
-  root.setAttribute('height', rootAttrs.height || h);
-  if(rootAttrs.viewBox) root.setAttribute('viewBox', rootAttrs.viewBox);
+  root.setAttribute('width', (rootAttrs && rootAttrs.width) || w);
+  root.setAttribute('height', (rootAttrs && rootAttrs.height) || h);
+  if(rootAttrs && rootAttrs.viewBox) root.setAttribute('viewBox', rootAttrs.viewBox);
   groups.forEach(g => root.appendChild(g));
 
   const serializer = new XMLSerializer();
@@ -1083,8 +1325,8 @@ document.getElementById('editApply').addEventListener('click', ()=>{
 
   if(Array.isArray(selectedBuilding.material)) selectedBuilding.material.forEach(m=>m.dispose());
   selectedBuilding.material = [
-    new THREE.MeshLambertMaterial({ color: shiftBrightness(newColor, -12) }),
-    new THREE.MeshLambertMaterial({ color: shiftBrightness(newColor, +14) })
+    new THREE.MeshLambertMaterial({ color: shiftBrightness(newColor, -18) }),
+    new THREE.MeshLambertMaterial({ color: newColor })
   ];
   selectedBuilding.userData.height = newHeight;
   selectedBuilding.userData.baseColor = newColor;
